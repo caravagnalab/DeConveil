@@ -57,7 +57,7 @@ These data frames are further processed to separate gene groups using `define_ge
 A tutorial of the analysis workflow is available in `test_deconveil.ipynb`
 
 
-#### Citation
+### Citation
 
 [![](http://img.shields.io/badge/doi-10.1101/2025.03.29.646108-red.svg)](https://doi.org/10.1101/2025.03.29.646108)
 
@@ -66,7 +66,7 @@ If you use `DeConveil`, cite:
 K. Davydzenka, G. Caravagna, G. Sanguinetti. Extending differential gene expression testing to handle genome aneuploidy in cancer. [bioRxiv preprint](https://doi.org/10.1101/2025.03.29.646108), 2025.
 
 
-#### Copyright and contacts
+### Copyright and contacts
 
 Katsiaryna Davydzenka, Cancer Data Science (CDS) Laboratory.
 
