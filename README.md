@@ -5,6 +5,8 @@
 #
 [![pypi version](https://img.shields.io/pypi/v/DeConveil)](https://pypi.org/project/DeConveil)
 
+## Introduction
+
 The goal of *DeConveil* is the extension of Differential Gene Expression testing by accounting for genome aneuploidy.
 This computational framework extends traditional DGE analysis by integrating DNA Copy Number Variation (CNV) data.
 This approach adjusts for dosage effects and categorizes genes as *dosage-sensitive (DSG)*, *dosage-insensitive (DIG)*, and *dosage-compensated (DCG)*, separating the expression changes caused by CNVs from other alterations in transcriptional regulation.
@@ -13,7 +15,7 @@ To perform this gene separation we need to carry out DGE testing using both *PyD
 You can download the results of our analysis from [deconveilCaseStudies](https://github.com/kdavydzenka/deconveilCaseStudies)
 
 
-### Installation
+## Installation
 
 **Pre-required installations before running DeConveil**
 
@@ -21,10 +23,16 @@ Python libraries are required to be installed: *pydeseq2*
 
 `pip install pydeseq2`
 
+`DeConveil` can be installed from PyPI using `pip`:
+
 `pip install DeConveil`
 
-or `git clone https://github.com/caravagnalab/DeConveil.git`
+`DeConveil` can also be installed from Bioconda with `conda`:
 
+`conda install -c bioconda deconveil`
+
+
+## Data
 
 **Input data**
 
