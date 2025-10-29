@@ -20,6 +20,10 @@ from pydeseq2.utils import get_num_processes
 from pydeseq2.grid_search import grid_fit_alpha
 from pydeseq2.grid_search import grid_fit_shrink_beta
 
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri, conversion, Formula
+from rpy2.robjects.packages import importr
+
 
 def irls_glm(
     counts: np.ndarray,
@@ -43,13 +47,17 @@ def irls_glm(
     # if full rank, estimate initial betas for IRLS below
     if np.linalg.matrix_rank(X) == num_vars:
         Q, R = np.linalg.qr(X)
+        eps = 1e-8
+        cnv = np.where(cnv == 0, eps, cnv)
         y = np.log((counts / cnv) / size_factors + 0.1)
+        #y = np.log(counts / size_factors + 0.1)
         beta_init = solve(R, Q.T @ y)
         beta = beta_init
 
     else:  # Initialise intercept with log base mean
         beta_init = np.zeros(num_vars)
         beta_init[0] = np.log((counts / cnv) / size_factors).mean()
+        #beta_init[0] = np.log(counts / size_factors).mean()
         beta = beta_init
         
     dev = 1000.0
@@ -57,12 +65,14 @@ def irls_glm(
 
     ridge_factor = np.diag(np.repeat(1e-6, num_vars))
     mu = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+    #mu = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
     
     converged = True
     i = 0
     while dev_ratio > beta_tol:
         W = mu / (1.0 + mu * disp)
         z = np.log((mu / cnv) / size_factors) + (counts - mu) / mu
+        #z = np.log(mu / size_factors) + (counts - mu) / mu
         H = (X.T * W) @ X + ridge_factor
         beta_hat = solve(H, X.T @ (W * z), assume_a="pos")
         i += 1
@@ -72,11 +82,13 @@ def irls_glm(
             def f(beta: np.ndarray) -> float:
                 # closure to minimize
                 mu_ = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+                #mu_ = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
                 
                 return nb_nll(counts, mu_, disp) + 0.5 * (ridge_factor @ beta**2).sum()
 
             def df(beta: np.ndarray) -> np.ndarray:
                 mu_ = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+                #mu_ = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
                 return (
                     -X.T @ counts
                     + ((1 / disp + counts) * mu_ / (1 / disp + mu_)) @ X
@@ -97,10 +109,12 @@ def irls_glm(
             
             beta = res.x
             mu = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+            #mu = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
             converged = res.success
 
         beta = beta_hat
         mu = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+        #mu = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
         
         # Compute deviation
         old_dev = dev
@@ -117,6 +131,7 @@ def irls_glm(
     # Return an UNthresholded mu 
     # Previous quantities are estimated with a threshold though
     mu = np.maximum(cnv * size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
+    #mu = np.maximum(size_factors * np.exp(np.clip(X @ beta, -30, 30)), min_mu)
     
     return beta, mu, H, converged
 
@@ -222,7 +237,14 @@ def fit_moments_dispersions2(
     """
     # Exclude genes with all zeroes
     #normed_counts = normed_counts[:, ~(normed_counts == 0).all(axis=0)]
-    # mean inverse size factor
+    is_all_zero = (normed_counts == 0).all(axis=0)
+    # if DataFrame -> Series; if ndarray -> ndarray
+    mask = ~np.asarray(is_all_zero)
+    if hasattr(normed_counts, "loc"):
+        normed_counts = normed_counts.loc[:, mask]
+    else:
+        normed_counts = normed_counts[:, mask]
+    #mean inverse size factor
     s_mean_inv = (1 /size_factors).mean()
     mu = normed_counts.mean(0)
     sigma = normed_counts.var(0, ddof=1)
@@ -407,6 +429,8 @@ def nbinomGLM(
         d_nll = (
             counts - (counts + size) / (1 + size * np.exp(-xbeta - offset - cnv))
         ) @ design_matrix
+            #counts - (counts + size) / (1 + size * np.exp(-xbeta - offset))
+        #) @ design_matrix
 
         return (d_neg_prior - d_nll) / cnst
 
@@ -415,6 +439,7 @@ def nbinomGLM(
         # Note: will only work if there is a single shrink index
         xbeta = design_matrix @ beta
         exp_xbeta_off = np.exp(xbeta + offset + cnv)
+        #exp_xbeta_off = np.exp(xbeta + offset)
         frac = (counts + size) * size * exp_xbeta_off / (size + exp_xbeta_off) ** 2
         # Build diagonal
         h11 = 1 / prior_no_shrink_scale**2
@@ -521,153 +546,165 @@ def nbinomFn(
     nll = (
         counts * xbeta - (counts + size) * np.logaddexp(xbeta + offset + cnv, np.log(size))
     ).sum(0)
+        #counts * xbeta - (counts + size) * np.logaddexp(xbeta + offset, np.log(size))
+    #).sum(0)
 
     return prior - nll
 
 
-def build_design_matrix(
-    metadata: pd.DataFrame,
-    design_factors: Union[str, List[str]] = "condition",
-    ref_level: Optional[List[str]] = None,
-    continuous_factors: Optional[List[str]] = None,
-    expanded: bool = False,
-    intercept: bool = True,
-) -> pd.DataFrame:
-    """Build design_matrix matrix for DEA.
-
-    Unless specified, the reference factor is chosen alphabetically.
+def run_deseq2_multifactor(rna_counts, 
+                           metadata, 
+                           cnv_matrix, 
+                           design_formula="~condition * CN",
+                           shrink_coef=None,
+                           shrink_type="apeglm"):
+    """
+    Run DESeq2 multifactor model integrating CN (copy-number) information as a continuous covariate.
+    Automatically computes mean CN per sample from a genes x samples CNV matrix.
 
     Parameters
     ----------
-    metadata : pandas.DataFrame
-        DataFrame containing metadata information.
-        Must be indexed by sample barcodes.
-
-    design_factors : str or list
-        Name of the columns of metadata to be used as design_matrix variables.
-        (default: ``"condition"``).
-
-    ref_level : dict or None
-        An optional list of two strings of the form ``["factor", "ref_level"]``
-        specifying the factor of interest and the desired reference level, e.g.
-        ``["condition", "A"]``. (default: ``None``).
-
-    continuous_factors : list or None
-        An optional list of continuous (as opposed to categorical) factors. Any factor
-        not in ``continuous_factors`` will be considered categorical (default: ``None``).
-
-    expanded : bool
-        If true, use one column per category. Else, use n-1 columns, for each n-level
-        categorical factor.
-        (default: ``False``).
-
-    intercept : bool
-        If true, add an intercept (a column containing only ones). (default: ``True``).
+    rna_counts : pd.DataFrame
+        Gene expression count matrix (genes x samples)
+    metadata : pd.DataFrame
+        Sample-level metadata (samples x covariates)
+    cnv_matrix : pd.DataFrame
+        CNV data matrix (genes x samples)
+    design_formula : str
+        R-style formula for DESeq2 (e.g. "~ condition + CN" or "~ condition * CN")
+    shrink_coef : str, optional
+        Name of coefficient for LFC shrinkage (must match resultsNames(dds))
+    shrink_type : str, optional
+        Shrinkage estimator type (default: "apeglm")
 
     Returns
     -------
-    pandas.DataFrame
-        A DataFrame with experiment design information (to split cohorts).
-        Indexed by sample barcodes.
+    res_df : pd.DataFrame
+        DESeq2 results table
+    merged_metadata : pd.DataFrame
+        Metadata with CN column added
     """
-    if isinstance(
-        design_factors, str
-    ):  # if there is a single factor, convert to singleton list
-        design_factors = [design_factors]
 
-    for factor in design_factors:
-        # Check that each factor has at least 2 levels
-        if len(np.unique(metadata[factor])) < 2:
+    deseq2 = importr("DESeq2")
+
+    # Align samples 
+    shared_samples = (
+        rna_counts.columns
+        .intersection(metadata.index)
+        .intersection(cnv_matrix.columns)
+    )
+
+    if len(shared_samples) == 0:
+        raise ValueError("No overlapping samples found across inputs.")
+
+    rna_counts = rna_counts[shared_samples]
+    metadata = metadata.loc[shared_samples]
+    cnv_matrix = cnv_matrix[shared_samples]
+
+    if rna_counts.shape[0] < rna_counts.shape[1]:
+        print("Transposing RNA count matrix to match DESeq2 format (genes as rows).")
+        rna_counts = rna_counts.T
+
+    # Compute mean CN per sample 
+    metadata["CNmean"] = cnv_matrix.mean(axis=0).astype(float)
+
+    # Assign CN status
+    metadata["CNstatus"] = pd.cut(
+        metadata["CNmean"],
+        bins=[-np.inf, 1.8, 2.2, np.inf],
+        labels=["Loss", "Neutral", "Gain"]
+    )
+
+    # Convert all object columns to categorical, except CNmean
+    cat_cols = [
+        c for c in metadata.select_dtypes(include=["object", "category"]).columns
+        if c != "CNmean"
+    ]
+    
+    for col in cat_cols:
+        metadata[col] = metadata[col].astype("category")
+
+    # Ensure CNmean stays numeric
+    if "CNmean" in metadata.columns:
+        metadata["CNmean"] = pd.to_numeric(metadata["CNmean"], errors="coerce")
+
+    # Index and type preparation 
+    rna_counts.index = rna_counts.index.astype(str)
+    metadata.index = metadata.index.astype(str)
+   
+    # Convert to R objects 
+    with conversion.localconverter(ro.default_converter + pandas2ri.converter):
+        rna_counts_r = conversion.py2rpy(rna_counts.astype(int))
+        metadata_r = conversion.py2rpy(metadata)
+
+    # Assign to R environment 
+    ro.globalenv["rna_counts_r"] = rna_counts_r
+    ro.globalenv["metadata_r"] = metadata_r
+    ro.globalenv["gene_names"] = ro.StrVector(rna_counts.index.tolist())
+    ro.globalenv["sample_names"] = ro.StrVector(metadata.index.tolist())
+    ro.r("rownames(rna_counts_r) <- gene_names")
+    ro.r("rownames(metadata_r) <- sample_names")
+
+    # ensure all factors are unordered in R
+    ro.r('''
+    for (col in colnames(metadata_r)) {
+      if (is.factor(metadata_r[[col]]) && is.ordered(metadata_r[[col]])) {
+        metadata_r[[col]] <- factor(metadata_r[[col]], ordered = FALSE)
+      }
+    }
+    ''')
+
+    # Validate sample alignment in R 
+    alignment_check = ro.r('all(colnames(rna_counts_r) == rownames(metadata_r))')[0]
+    if not alignment_check:
+        raise ValueError("Sample names in rna_counts and metadata do not align after conversion.")
+
+    # Run DESeq2 
+    print("Running DESeq2 with design:", design_formula)
+    dds = deseq2.DESeqDataSetFromMatrix(
+        countData=ro.globalenv["rna_counts_r"],
+        colData=ro.globalenv["metadata_r"],
+        design=Formula(design_formula)
+    )
+
+    dds = deseq2.DESeq(dds)
+    ro.globalenv["dds"] = dds
+
+    # Show available coefficients ----
+    coef_names = list(ro.r("resultsNames(dds)"))
+    print("\nAvailable model coefficients:")
+    for c in coef_names:
+        print("  -", c)
+
+    coef_names = list(ro.r("resultsNames(dds)"))
+    if len(coef_names) == 0:
+    # Fallback: use coef(dds) column names
+        alt_coef_names = list(ro.r("colnames(coef(dds))"))
+        print("\n resultsNames(dds) is empty — falling back to coef() column names:")
+        print("  ", alt_coef_names)
+        coef_names = alt_coef_names
+
+    # Compute results (with optional shrinkage) 
+    if shrink_coef is not None:
+        if shrink_coef not in coef_names:
             raise ValueError(
-                f"Factors should take at least two values, but {factor} "
-                f"takes the single value '{np.unique(metadata[factor])}'."
+                f"Requested shrink_coef '{shrink_coef}' not found in resultsNames(dds).\n"
+                f"Available: {coef_names}"
             )
-
-    # Check that level factors in the design don't contain underscores. If so, convert
-    # them to hyphens
-    warning_issued = False
-    for factor in design_factors:
-        if np.any(["_" in value for value in metadata[factor]]):
-            if not warning_issued:
-                warnings.warn(
-                    """Some factor levels in the design contain underscores ('_').
-                    They will be converted to hyphens ('-').""",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                warning_issued = True
-            metadata[factor] = metadata[factor].apply(lambda x: x.replace("_", "-"))
-
-    if continuous_factors is not None:
-        categorical_factors = [
-            factor for factor in design_factors if factor not in continuous_factors
-        ]
-    else:
-        categorical_factors = design_factors
-
-    # Check that there is at least one categorical factor
-    if len(categorical_factors) > 0:
-        design_matrix = pd.get_dummies(
-            metadata[categorical_factors], drop_first=not expanded
+        print(f"\nPerforming LFC shrinkage for coefficient: {shrink_coef}")
+        res_shr = deseq2.lfcShrink(
+            dds,
+            coef=shrink_coef,
+            type=shrink_type
         )
-
-        if ref_level is not None:
-            if len(ref_level) != 2:
-                raise KeyError("The reference level should contain 2 strings.")
-            if ref_level[1] not in metadata[ref_level[0]].values:
-                raise KeyError(
-                    f"The metadata data should contain a '{ref_level[0]}' column"
-                    f" with a '{ref_level[1]}' level."
-                )
-
-            # Check that the reference level is not in the matrix (if unexpanded design)
-            ref_level_name = "_".join(ref_level)
-            if (not expanded) and ref_level_name in design_matrix.columns:
-                # Remove the reference level and add one
-                factor_cols = [
-                    col for col in design_matrix.columns if col.startswith(ref_level[0])
-                ]
-                missing_level = next(
-                    level
-                    for level in np.unique(metadata[ref_level[0]])
-                    if f"{ref_level[0]}_{level}" not in design_matrix.columns
-                )
-                design_matrix[f"{ref_level[0]}_{missing_level}"] = 1 - design_matrix[
-                    factor_cols
-                ].sum(1)
-                design_matrix.drop(ref_level_name, axis="columns", inplace=True)
-
-        if not expanded:
-            # Add reference level as column name suffix
-            for factor in design_factors:
-                if ref_level is None or factor != ref_level[0]:
-                    # The reference is the unique level that is no longer there
-                    ref = next(
-                        level
-                        for level in np.unique(metadata[factor])
-                        if f"{factor}_{level}" not in design_matrix.columns
-                    )
-                else:
-                    # The reference level is given as an argument
-                    ref = ref_level[1]
-                design_matrix.columns = [
-                    f"{col}_vs_{ref}" if col.startswith(factor) else col
-                    for col in design_matrix.columns
-                ]
+        res_df_r = ro.r("as.data.frame")(res_shr)
     else:
-        # There is no categorical factor in the design
-        design_matrix = pd.DataFrame(index=metadata.index)
+        print("\nExtracting standard DESeq2 results (no shrinkage).")
+        res = deseq2.results(dds)
+        res_df_r = ro.r("as.data.frame")(res)
 
-    if intercept:
-        design_matrix.insert(0, "intercept", 1)
+    # Convert back to pandas
+    with conversion.localconverter(ro.default_converter + pandas2ri.converter):
+        res_df = conversion.rpy2py(res_df_r)
 
-    # Convert categorical factors one-hot encodings to int
-    design_matrix = design_matrix.astype("int")
-
-    # Add continuous factors
-    if continuous_factors is not None:
-        for factor in continuous_factors:
-            # This factor should be numeric
-            design_matrix[factor] = pd.to_numeric(metadata[factor])
-    return design_matrix
-
+    return dds, res_df 

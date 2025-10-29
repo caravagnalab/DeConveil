@@ -67,6 +67,7 @@ def grid_fit_beta(
             raise ValueError("Beta is not properly initialized or has an unexpected shape.")
 
             
+        #mu = np.maximum(size_factors[:, None] * np.exp(design_matrix @ beta.T), min_mu)
         mu = np.maximum(cnv * size_factors[:, None] * np.exp(design_matrix @ beta.T), min_mu)
         return vec_nb_nll(counts, mu, disp) + 0.5 * (1e-6 * beta**2).sum(1)
 
