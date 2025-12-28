@@ -615,7 +615,6 @@ class deconveil_fit:
 
         # Convert to numpy for speed
         design_matrix = self.obsm["design_matrix"].values
-        #size_factors = self.obsm["size_factors"].values
         size_factors = np.asarray(self.obsm["size_factors"]).reshape(-1) 
         counts=self.data["counts"].to_numpy()
         cnv=self.data["cnv"].to_numpy()
@@ -719,7 +718,7 @@ class deconveil_fit:
         """Return the dispersion trend function at x."""
         if self.uns["disp_function_type"] == "parametric":
             return dispersion_trend(x, self.uns["trend_coeffs"])
-        elif self.disp_function_type == "mean":
+        elif self.uns["disp_function_type"] == "mean":
             return np.full_like(x, self.uns["mean_disp"])
             
 
@@ -841,8 +840,7 @@ class deconveil_fit:
         design_matrix = self.obsm["design_matrix"].values
         counts=self.data["counts"].to_numpy()
         cnv=self.data["cnv"].to_numpy()
-        cnv = cnv / 2
-        cnv = cnv + 0.1
+        cnv = (cnv / 2) + 0.1  
 
         if not self.quiet:
             print("Fitting LFCs...", file=sys.stderr)
@@ -850,7 +848,6 @@ class deconveil_fit:
         mle_lfcs_, mu_, hat_diagonals_, converged_ = self.inference.irls_glm(
             counts=counts[:, self.non_zero_idx],
             cnv=cnv[:, self.non_zero_idx],
-            #size_factors=self.obsm["size_factors"].values,
             size_factors=np.asarray(self.obsm["size_factors"]).reshape(-1),
             design_matrix=design_matrix,
             disp=self.varm["dispersions"][self.non_zero_idx],

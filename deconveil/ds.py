@@ -397,7 +397,8 @@ class deconveil_stats:
         
         counts=self.dds.data["counts"]
         cnv=self.dds.data["cnv"].to_numpy()
-        cnv = cnv + 0.1
+        cnv = (cnv / 2) + 0.1 
+        #cnv = cnv + 0.1
         cnv = np.log(cnv)      
 
         # Set priors
@@ -534,7 +535,6 @@ class deconveil_stats:
 
         # As in DESeq2, only take samples with 3 or more replicates when looking for
         # max cooks.
-        #use_for_max = n_or_more_replicates(self.design_matrix, 3)
         use_for_max = n_or_more_replicates(self.dds.obsm["design_matrix"], 3).values
 
         # If for a gene there are 3 samples or more that have more counts than the
