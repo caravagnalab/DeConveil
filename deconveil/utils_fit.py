@@ -20,6 +20,11 @@ from pydeseq2.utils import get_num_processes
 from pydeseq2.grid_search import grid_fit_alpha
 from pydeseq2.grid_search import grid_fit_shrink_beta
 
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri, conversion, Formula
+import rpy2.robjects.packages as rpackages
+from rpy2.robjects.packages import importr
+
 
 def irls_glm(
     counts: np.ndarray,
@@ -43,6 +48,8 @@ def irls_glm(
     # if full rank, estimate initial betas for IRLS below
     if np.linalg.matrix_rank(X) == num_vars:
         Q, R = np.linalg.qr(X)
+        eps = 1e-8
+        cnv = np.where(cnv == 0, eps, cnv)
         y = np.log((counts / cnv) / size_factors + 0.1)
         beta_init = solve(R, Q.T @ y)
         beta = beta_init
@@ -222,7 +229,14 @@ def fit_moments_dispersions2(
     """
     # Exclude genes with all zeroes
     #normed_counts = normed_counts[:, ~(normed_counts == 0).all(axis=0)]
-    # mean inverse size factor
+    is_all_zero = (normed_counts == 0).all(axis=0)
+    # if DataFrame -> Series; if ndarray -> ndarray
+    mask = ~np.asarray(is_all_zero)
+    if hasattr(normed_counts, "loc"):
+        normed_counts = normed_counts.loc[:, mask]
+    else:
+        normed_counts = normed_counts[:, mask]
+    #mean inverse size factor
     s_mean_inv = (1 /size_factors).mean()
     mu = normed_counts.mean(0)
     sigma = normed_counts.var(0, ddof=1)
@@ -407,7 +421,7 @@ def nbinomGLM(
         d_nll = (
             counts - (counts + size) / (1 + size * np.exp(-xbeta - offset - cnv))
         ) @ design_matrix
-
+            
         return (d_neg_prior - d_nll) / cnst
 
     def ddf(beta: np.ndarray, cnst: float = scale_cnst) -> np.ndarray:
@@ -525,149 +539,179 @@ def nbinomFn(
     return prior - nll
 
 
-def build_design_matrix(
-    metadata: pd.DataFrame,
-    design_factors: Union[str, List[str]] = "condition",
-    ref_level: Optional[List[str]] = None,
-    continuous_factors: Optional[List[str]] = None,
-    expanded: bool = False,
-    intercept: bool = True,
-) -> pd.DataFrame:
-    """Build design_matrix matrix for DEA.
+def run_stageR(
+    res_pydeseq,
+    res_deconveil,
+    screen_col="pvalue",
+    confirm_col="pvalue",
+    alpha=0.05,
+    method="holm",
+):
+    """
+    Two-stage gene-level multiple testing using stageR.
 
-    Unless specified, the reference factor is chosen alphabetically.
+    Stage I (screening):
+        - Omnibus Simes test combining CN-naive and CN-aware p-values
+        - BH FDR applied once across genes
+
+    Stage II (confirmation):
+        - Within-gene multiplicity correction (Holm) on naive + aware tests
+        - Conditional on passing Stage I
 
     Parameters
     ----------
-    metadata : pandas.DataFrame
-        DataFrame containing metadata information.
-        Must be indexed by sample barcodes.
-
-    design_factors : str or list
-        Name of the columns of metadata to be used as design_matrix variables.
-        (default: ``"condition"``).
-
-    ref_level : dict or None
-        An optional list of two strings of the form ``["factor", "ref_level"]``
-        specifying the factor of interest and the desired reference level, e.g.
-        ``["condition", "A"]``. (default: ``None``).
-
-    continuous_factors : list or None
-        An optional list of continuous (as opposed to categorical) factors. Any factor
-        not in ``continuous_factors`` will be considered categorical (default: ``None``).
-
-    expanded : bool
-        If true, use one column per category. Else, use n-1 columns, for each n-level
-        categorical factor.
-        (default: ``False``).
-
-    intercept : bool
-        If true, add an intercept (a column containing only ones). (default: ``True``).
+    res_pydeseq : pd.DataFrame
+        CN-naive DE results with raw p-values
+    res_deconveil : pd.DataFrame
+        CN-aware DE results with raw p-values
+    screen_col : str
+        Column name of raw p-values (used for screening)
+    confirm_col : str
+        Column name of raw p-values (used for confirmation)
+    alpha : float
+        Target FDR level
+    method : str
+        Within-gene correction method (e.g. "holm")
 
     Returns
     -------
-    pandas.DataFrame
-        A DataFrame with experiment design information (to split cohorts).
-        Indexed by sample barcodes.
+    res_screen : pd.DataFrame
+        Adjusted screening p-values (gene-level)
+    res_confirm : pd.DataFrame
+        0/1 confirmation decisions per hypothesis
+    res_naive_upd : pd.DataFrame
+        CN-naive results with stageR-adjusted q-values
+    res_aware_upd : pd.DataFrame
+        CN-aware results with stageR-adjusted q-values
     """
-    if isinstance(
-        design_factors, str
-    ):  # if there is a single factor, convert to singleton list
-        design_factors = [design_factors]
 
-    for factor in design_factors:
-        # Check that each factor has at least 2 levels
-        if len(np.unique(metadata[factor])) < 2:
-            raise ValueError(
-                f"Factors should take at least two values, but {factor} "
-                f"takes the single value '{np.unique(metadata[factor])}'."
-            )
+    # --------------------------------------------------
+    # 1. Extract raw p-values
+    # --------------------------------------------------
+    p_naive = res_pydeseq[screen_col].astype(float)
+    p_aware = res_deconveil[screen_col].astype(float)
 
-    # Check that level factors in the design don't contain underscores. If so, convert
-    # them to hyphens
-    warning_issued = False
-    for factor in design_factors:
-        if np.any(["_" in value for value in metadata[factor]]):
-            if not warning_issued:
-                warnings.warn(
-                    """Some factor levels in the design contain underscores ('_').
-                    They will be converted to hyphens ('-').""",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                warning_issued = True
-            metadata[factor] = metadata[factor].apply(lambda x: x.replace("_", "-"))
+    # Ensure alignment
+    p_naive, p_aware = p_naive.align(p_aware, join="inner")
 
-    if continuous_factors is not None:
-        categorical_factors = [
-            factor for factor in design_factors if factor not in continuous_factors
-        ]
-    else:
-        categorical_factors = design_factors
+    # --------------------------------------------------
+    # 2. Omnibus screening p-values (Simes)
+    # --------------------------------------------------
+    p1 = np.minimum(p_naive, p_aware)
+    p2 = np.maximum(p_naive, p_aware)
+    p_screen = np.minimum(2.0 * p1, p2)
 
-    # Check that there is at least one categorical factor
-    if len(categorical_factors) > 0:
-        design_matrix = pd.get_dummies(
-            metadata[categorical_factors], drop_first=not expanded
+    #p_screen = pd.Series(p_screen, index=p_naive.index, name="p_screen")
+
+    # --------------------------------------------------
+    # 3. Confirmation p-values matrix
+    # --------------------------------------------------
+    
+    p_naive_conf = pd.DataFrame({"p_naive": res_pydeseq[confirm_col].astype(float)})
+    p_aware_conf = pd.DataFrame({"p_aware": res_deconveil[confirm_col].astype(float)})
+    p_conf = pd.concat([p_naive_conf, p_aware_conf], axis=1)
+
+    # stageR requires string rownames
+    p_screen.index = p_screen.index.astype(str)
+    p_conf.index = p_conf.index.astype(str)
+
+    # --------------------------------------------------
+    # 4. Convert to R
+    # --------------------------------------------------
+
+    with conversion.localconverter(ro.default_converter + pandas2ri.converter):
+        r_p_screen = conversion.py2rpy(p_screen)
+        r_p_conf   = conversion.py2rpy(p_conf)
+
+    # Assign R variables
+    genes = list(p_conf.index) 
+    ro.globalenv["p_screen"] = r_p_screen
+    ro.globalenv["p_conf"] = r_p_conf
+    ro.globalenv["genes"] = ro.StrVector(list(genes))
+    ro.globalenv["conf_names"] = ro.StrVector(list(p_conf.columns))
+
+    # --------------------------------------------------
+    # 5. Run stageR
+    # --------------------------------------------------
+    r_code = f"""
+        library(stageR)
+
+        p_conf <- as.matrix(p_conf)
+
+        stageRObj <- stageR(
+            pScreen = p_screen,
+            pConfirmation = p_conf,
+            pScreenAdjusted = FALSE
         )
 
-        if ref_level is not None:
-            if len(ref_level) != 2:
-                raise KeyError("The reference level should contain 2 strings.")
-            if ref_level[1] not in metadata[ref_level[0]].values:
-                raise KeyError(
-                    f"The metadata data should contain a '{ref_level[0]}' column"
-                    f" with a '{ref_level[1]}' level."
-                )
+        stageRObj <- stageWiseAdjustment(
+            stageRObj,
+            method = "{method}",
+            alpha = {alpha},
+            allowNA = TRUE
+        )
 
-            # Check that the reference level is not in the matrix (if unexpanded design)
-            ref_level_name = "_".join(ref_level)
-            if (not expanded) and ref_level_name in design_matrix.columns:
-                # Remove the reference level and add one
-                factor_cols = [
-                    col for col in design_matrix.columns if col.startswith(ref_level[0])
-                ]
-                missing_level = next(
-                    level
-                    for level in np.unique(metadata[ref_level[0]])
-                    if f"{ref_level[0]}_{level}" not in design_matrix.columns
-                )
-                design_matrix[f"{ref_level[0]}_{missing_level}"] = 1 - design_matrix[
-                    factor_cols
-                ].sum(1)
-                design_matrix.drop(ref_level_name, axis="columns", inplace=True)
+        res_screen <- getAdjustedPValues(
+            stageRObj,
+            onlySignificantGenes = FALSE,
+            order = FALSE
+        )
 
-        if not expanded:
-            # Add reference level as column name suffix
-            for factor in design_factors:
-                if ref_level is None or factor != ref_level[0]:
-                    # The reference is the unique level that is no longer there
-                    ref = next(
-                        level
-                        for level in np.unique(metadata[factor])
-                        if f"{factor}_{level}" not in design_matrix.columns
-                    )
-                else:
-                    # The reference level is given as an argument
-                    ref = ref_level[1]
-                design_matrix.columns = [
-                    f"{col}_vs_{ref}" if col.startswith(factor) else col
-                    for col in design_matrix.columns
-                ]
-    else:
-        # There is no categorical factor in the design
-        design_matrix = pd.DataFrame(index=metadata.index)
+        res_confirm <- getResults(stageRObj)
+    """
 
-    if intercept:
-        design_matrix.insert(0, "intercept", 1)
+    ro.r(r_code)
 
-    # Convert categorical factors one-hot encodings to int
-    design_matrix = design_matrix.astype("int")
+    # --------------------------------------------------
+    # 6. Convert back to Python
+    # --------------------------------------------------
+    
+    with conversion.localconverter(ro.default_converter + pandas2ri.converter):
+        res_screen = conversion.rpy2py(ro.r("res_screen"))
+        res_confirm = conversion.rpy2py(ro.r("res_confirm"))
 
-    # Add continuous factors
-    if continuous_factors is not None:
-        for factor in continuous_factors:
-            # This factor should be numeric
-            design_matrix[factor] = pd.to_numeric(metadata[factor])
-    return design_matrix
+    # Ensure pandas DataFrames
+    if isinstance(res_screen, np.ndarray):
+        rows = list(ro.r("rownames(res_screen)"))
+        cols = list(ro.r("colnames(res_screen)"))
+        res_screen = pd.DataFrame(res_screen, index=rows, columns=cols)
 
+    if isinstance(res_confirm, np.ndarray):
+        rows = list(ro.r("rownames(res_confirm)"))
+        cols = list(ro.r("colnames(res_confirm)"))
+        res_confirm = pd.DataFrame(res_confirm, index=rows, columns=cols)
+
+    # --------------------------------------------------
+    # 7. Attach results to original tables
+    # --------------------------------------------------
+
+    res_screen.index = res_screen.index.astype(str)
+
+    # 1) Update PyDESeq2 table with SCREEN q-values
+    res_pydeseq_upd = res_pydeseq.copy()
+    if "p_naive" in res_screen.columns:
+        res_pydeseq_upd["padj_stageR"] = (
+            res_screen["p_naive"].reindex(res_pydeseq_upd.index.astype(str)).values
+        )
+
+    # 2) Update DeConveil table with SCREEN q-values
+    res_deconveil_upd = res_deconveil.copy()
+    if "p_aware" in res_screen.columns:
+        res_deconveil_upd["padj_stageR"] = (
+            res_screen["p_aware"].reindex(res_pydeseq_upd.index.astype(str)).values
+        )
+
+    res_confirm.index = res_confirm.index.astype(str)
+    if "p_naive" in res_confirm.columns:
+        res_pydeseq_upd["DE_confirmed"] = (
+            res_confirm["p_naive"].reindex(res_pydeseq_upd.index.astype(str)).values
+        )
+
+    if "p_aware" in res_confirm.columns:
+        res_deconveil_upd["DE_confirmed"] = (
+            res_confirm["p_aware"].reindex(res_deconveil_upd.index.astype(str)).values
+        )
+    
+    # NA = not tested / not confirmed
+  
+    return res_screen, res_confirm, res_pydeseq_upd, res_deconveil_upd

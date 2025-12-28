@@ -5,6 +5,7 @@ from typing import List, Literal, Optional, Union, cast
 
 import numpy as np
 import pandas as pd
+from formulaic_contrasts import FormulaicContrasts  # type: ignore[import-untyped]
 from scipy.optimize import minimize
 from scipy.special import polygamma  # type: ignore
 from scipy.stats import f  # type: ignore
@@ -17,7 +18,6 @@ from deconveil.utils_fit import fit_rough_dispersions
 from deconveil.utils_fit import fit_moments_dispersions2
 from deconveil.utils_fit import grid_fit_beta
 from deconveil.utils_fit import irls_glm
-from deconveil.utils_fit import build_design_matrix
 from deconveil.utils_processing import replace_underscores
 
 from pydeseq2.preprocessing import deseq2_norm_fit
@@ -43,23 +43,20 @@ class deconveil_fit:
     cnv : pandas.DataFrame
         Discrete numbres. One column per gene, rows are indexed by sample barcodes.
     
-
     metadata : pandas.DataFrame
         DataFrame containing sample metadata.
         Must be indexed by sample barcodes.
 
-    design_factors : str or list
-        Name of the columns of metadata to be used as design variables.
-        (default: ``'condition'``).
-    
-    continuous_factors : list or None
-        An optional list of continuous (as opposed to categorical) factors. Any factor
-        not in ``continuous_factors`` will be considered categorical (default: ``None``).
+    design : str or pandas.DataFrame
+        Model design. Can be either a pandas DataFrame representing a design matrix, or
+        a formulaic formula in the format ``'x + z'`` or ``'~x+z'``.
+        If a design matrix is provided,  deconveil_stats built from this deconveil_fit will
+        only support contrasts in the form of numeric vectors.
+        (Default: ``'~condition')``.
 
-    ref_level : list or None
-        An optional list of two strings of the form ``["factor", "test_level"]``
-        specifying the factor of interest and the reference (control) level against which
-        we're testing, e.g. ``["condition", "A"]``. (default: ``None``).
+    design_factors : str or list, optional
+        Depecated. An optional list of factors to include in the design matrix.
+        (default: ``None``)
 
     fit_type: str
         Either ``"parametric"`` or ``"mean"`` for the type of fitting of dispersions to
@@ -67,6 +64,20 @@ class deconveil_fit:
         robust gamma-family GLM. ``"mean"``: use the mean of gene-wise dispersion
         estimates. Will set the fit type for the DEA and the vst transformation. If
         needed, it can be set separately for each method.(default: ``"parametric"``).
+
+    size_factors_fit_type : str
+        The normalization method to use: ``"ratio"``, ``"poscounts"`` or ``"iterative"``.
+        ``"ratio"``: fit size factors using the median-of-ratios method. ``"poscounts"``:
+        fit size factors using the method implemented in DESeq2 for the case where there
+        may be few or no genes which have no zero values.
+        ``"iterative"``: fit size factors iteratively. (default: ``"ratio"``).
+
+    control_genes : ndarray, list, or pandas.Index, optional
+        Genes to use as control genes for size factor fitting. If provided, size factors
+        will be fit using only these genes. This is useful when certain genes are known
+        to be invariant across conditions (e.g., housekeeping genes). Any valid AnnData
+        indexer (bool array, integer positions, or gene name strings) can be used.
+        (default: ``None``).
         
     min_mu : float
         Threshold for mean estimates. (default: ``0.5``).
@@ -119,27 +130,36 @@ class deconveil_fit:
     filtered_genes: numpy.ndarray
         Genes whose log means are different from -∞, computed in
         preprocessing.deseq2_norm_fit().
+
+    factor_storage : dict
+        A dictionary storing metadata for each factor processed by the custom
+        materializer (only if ``design`` is input as a formula).
+
+    variable_to_factors : dict
+        A dictionary mapping variable names to factor names (only if ``design`` is input
+        as a formula).
     
     """
     
     def __init__(
         self,
         *,
-        counts: Optional[pd.DataFrame] = None,
-        cnv: Optional[pd.DataFrame] = None,
-        metadata: Optional[pd.DataFrame] = None,
-        design_factors: Union[str, List[str]] = "condition",
-        continuous_factors: Optional[List[str]] = None,
-        ref_level: Optional[List[str]] = None,
+        counts: pd.DataFrame | None = None,
+        cnv: pd.DataFrame | None = None,
+        metadata: pd.DataFrame | None = None,
+        design: str | pd.DataFrame = "~condition",
+        design_factors: str | list[str] | None = None,
         fit_type: Literal["parametric", "mean"] = "parametric",
+        size_factors_fit_type: Literal["ratio", "poscounts", "iterative"] = "ratio",
+        control_genes: np.ndarray | list[str] | list[int] | pd.Index | None = None,
         min_mu: float = 0.5,
         min_disp: float = 1e-8,
         max_disp: float = 10.0,
         refit_cooks: bool = True,
         min_replicates: int = 7,
         beta_tol: float = 1e-8,
-        n_cpus: Optional[int] = None,
-        inference: Optional[Inference] = None,
+        n_cpus: int | None = None,
+        inference: Inference | None = None,
         quiet: bool = False,
     ) -> None:
         
@@ -159,27 +179,43 @@ class deconveil_fit:
 
         self.metadata = metadata
         self.fit_type = fit_type
-
-        # Convert design_factors to list if a single string was provided.
-        self.design_factors = (
-            [design_factors] if isinstance(design_factors, str) else design_factors
-        )
-
-        self.continuous_factors = continuous_factors
-
-
-        # Build the design matrix
-        self.design_matrix = build_design_matrix(
-            metadata=self.metadata,
-            design_factors=self.design_factors,
-            continuous_factors=self.continuous_factors,
-            ref_level=ref_level,
-            expanded=False,
-            intercept=True,
-        )
-        
+        self.design = design
         self.obsm={}
-        self.obsm["design_matrix"] = self.design_matrix 
+        
+
+        if design_factors is not None:
+            warnings.warn(
+                "design_factors are deprecated and will soon be removed"
+                "Please consider providing a formulaic formula using the design argument instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            design_factors = (
+                design_factors if isinstance(design_factors, list) else [design_factors]
+            )
+            self.design = "~" + " + ".join(design_factors)
+
+        if not (
+            isinstance(self.design, (str | pd.DataFrame)) or isinstance(self.design, str)
+        ):
+            raise ValueError(
+                "design must be a string representing a formulaic formula, or a pandas DataFrame."
+            )
+
+        if isinstance(self.design, str):
+            # Keep track of the categorical factors used in the model specification,
+            # including variable and factor names, by generating a custom materializer.
+            self.formulaic_contrasts = FormulaicContrasts(self.metadata, self.design)
+            self.obsm["design_matrix"] = self.formulaic_contrasts.design_matrix
+        else:
+            self.obsm["design_matrix"] = self.design
+
+        if self.obsm["design_matrix"].isna().any().any():
+            raise ValueError("NaNs are not allowed in the design.")
+
+        # Check that the design matrix has full rank
+        self._check_full_rank_design()
+
         self.min_mu = min_mu
         self.min_disp = min_disp
         self.n_obs=self.data["counts"].shape[0]
@@ -187,15 +223,17 @@ class deconveil_fit:
         self.var_names=self.data["counts"].columns
         self.max_disp = np.maximum(max_disp, self.n_obs)
         self.refit_cooks = refit_cooks
-        self.ref_level = ref_level
         self.min_replicates = min_replicates
         self.beta_tol = beta_tol
         self.quiet = quiet
-        self.logmeans = None
+        self.size_factors_fit_type = size_factors_fit_type
+        self.control_genes = control_genes
+        self.logmeans: np.ndarray | None = None
         self.filtered_genes = None
         self.uns={}
         self.varm={}
         self.layers={}
+        self.filtered_genes: np.ndarray | None = None
         
         
         if inference:
@@ -211,16 +249,42 @@ class deconveil_fit:
                 )
         # Initialize the inference object.
         self.inference = inference or DefInference(n_cpus=n_cpus)
+
+    @property
+    def variables(self):
+        """Get the names of the variables used in the model definition."""
+        try:
+            return self.formulaic_contrasts.variables
+        except AttributeError:
+            raise ValueError(
+                """Retrieving variables is only possible if the model was initialized
+                using a formula."""
+            ) from None
         
 
     def vst(
         self,
         use_design: bool = False,
-        fit_type: Optional[Literal["parametric", "mean"]] = None,
+        fit_type: Literal["parametric", "mean"] | None = None,
     ) -> None:
         
         """Fit a variance stabilizing transformation, and apply it to normalized counts.
         Results are stored in ``vst_counts"``.
+
+        Parameters
+        ----------
+        use_design : bool
+            Whether to use the full design matrix to fit dispersions and the trend curve.
+            If False, only an intercept is used. (default: ``False``).
+
+        fit_type: str
+            * ``None``: fit_type provided at initialization to fit
+              the dispersions trend curve.
+            * ``"parametric"``: fit a dispersion-mean relation via a robust
+              gamma-family GLM.
+            * ``"mean"``: use the mean of gene-wise dispersion estimates.
+
+            (default: ``None``).
         """
         
         if fit_type is not None:
@@ -254,7 +318,9 @@ class deconveil_fit:
         # Start by fitting median-of-ratio size factors if not already present,
         # or if they were computed iteratively
         if "size_factors" not in self.obsm or self.logmeans is None:
-            self.fit_size_factors()  # by default, fit_type != "iterative"
+            self.fit_size_factors(
+                fit_type=self.size_factors_fit_type
+            )  
 
         if not hasattr(self, "vst_fit_type"):
             self.vst_fit_type = self.fit_type
@@ -286,7 +352,7 @@ class deconveil_fit:
             del self.obsm["design_matrix_buffer"]
             
         
-    def vst_transform(self, counts: Optional[np.ndarray] = None) -> np.ndarray:
+    def vst_transform(self, counts: np.ndarray | None = None) -> np.ndarray:
         
         """Apply the variance stabilizing transformation.
         Uses the results from the ``vst_fit`` method.
@@ -351,7 +417,7 @@ class deconveil_fit:
             )
             
     
-    def deseq2(self, fit_type: Optional[Literal["parametric", "mean"]] = None) -> None:
+    def deseq2(self, fit_type: Literal["parametric", "mean"] | None = None) -> None:
         
         """Perform dispersion and log fold-change (LFC) estimation.
 
@@ -372,8 +438,11 @@ class deconveil_fit:
         if fit_type is not None:
             self.fit_type = fit_type
             print(f"Using {self.fit_type} fit type.")
+            
         # Compute DESeq2 normalization factors using the Median-of-ratios method
-        self.fit_size_factors()
+        self.fit_size_factors(
+            fit_type=self.size_factors_fit_type, control_genes=self.control_genes
+        )
         # Fit an independent negative binomial model per gene
         self.fit_genewise_dispersions()
         # Fit a parameterized trend curve for dispersions, of the form
@@ -393,12 +462,30 @@ class deconveil_fit:
             # for genes that had outliers replaced
             self.refit()
 
+    def cond(self, **kwargs):
+        """
+        Get a contrast vector representing a specific condition.
+
+        Parameters
+        ----------
+        **kwargs
+            Column/value pairs.
+
+        Returns
+        -------
+        ndarray
+            A contrast vector that aligns to the columns of the design matrix.
+        """
+        return self.formulaic_contrasts.cond(**kwargs)
+
+    def contrast(self, *args, **kwargs):
+        """Get a contrast for a simple pairwise comparison."""
+        return self.formulaic_contrasts.contrast(*args, **kwargs)
+
     def fit_size_factors(
         self,
-        fit_type: Literal["ratio", "poscounts", "iterative"] = "ratio",
-        control_genes: Optional[
-            Union[np.ndarray, List[str], List[int], pd.Index]
-        ] = None,
+        fit_type: Literal["ratio", "poscounts", "iterative"] | None = None,
+        control_genes: np.ndarray | list[str] | list[int] | pd.Index | None = None,
     ) -> None:
         """Fit sample-wise deseq2 normalization (size) factors.
         Parameters
@@ -411,16 +498,27 @@ class deconveil_fit:
             are used. (default: ``None``).
         """
         
+        if fit_type is None:
+            fit_type = self.size_factors_fit_type
         if not self.quiet:
             print("Fitting size factors...", file=sys.stderr)
 
         start = time.time()
 
+        if control_genes is None:
+            # Check whether control genes were specified at initialization
+            if hasattr(self, "control_genes"):
+                control_genes = self.control_genes
+                if not self.quiet:
+                    print(
+                        f"Using {control_genes} as control genes, passed at"
+                        " deconveil_fit initialization"
+                    )
+
         # If control genes are provided, set a mask where those genes are True
         if control_genes is not None:
             _control_mask = np.zeros(self.data["counts"].shape[1], dtype=bool)
 
-            # Use AnnData internal indexing to get gene index array
             # Allows bool/int/var_name to be provided
             _control_mask[self._normalize_indices((slice(None), control_genes))[1]] = (
                 True
@@ -500,6 +598,9 @@ class deconveil_fit:
         # Check that size factors are available. If not, compute them.
         if "size_factors" not in self.obsm:
             self.fit_size_factors()
+
+        counts = self.data["counts"]
+       
             
         # Exclude genes with all zeroes
         self.varm["non_zero"] = ~(self.data["counts"] == 0).all(axis=0)
@@ -514,17 +615,22 @@ class deconveil_fit:
 
         # Convert to numpy for speed
         design_matrix = self.obsm["design_matrix"].values
+        size_factors = np.asarray(self.obsm["size_factors"]).reshape(-1) 
         counts=self.data["counts"].to_numpy()
         cnv=self.data["cnv"].to_numpy()
-       
-         # with a GLM (using rough dispersion estimates).
+
+        # mu_hat is initialized differently depending on the number of different factor
+        # groups. If there are as many different factor combinations as design factors
+        # (intercept included), it is fitted with a linear model, otherwise it is fitted
+        # with a GLM (using rough dispersion estimates).
+
         if (
             len(self.obsm["design_matrix"].value_counts())
             == self.obsm["design_matrix"].shape[-1]
         ):
             mu_hat_ = self.inference.lin_reg_mu(
                 counts=counts[:, self.non_zero_idx],
-                size_factors=self.obsm["size_factors"],
+                size_factors=size_factors,
                 design_matrix=design_matrix,
                 min_mu=self.min_mu,
             )
@@ -532,18 +638,20 @@ class deconveil_fit:
             _, mu_hat_, _, _ = self.inference.irls_glm(
                 counts=counts[:, self.non_zero_idx],
                 cnv=cnv[:, self.non_zero_idx],
-                size_factors=self.obsm["size_factors"],
+                size_factors=size_factors,
                 design_matrix=design_matrix,
                 disp=self.varm["_MoM_dispersions"][self.non_zero_idx],
                 min_mu=self.min_mu,
                 beta_tol=self.beta_tol,
             )
+
         mu_param_name = "_vst_mu_hat" if vst else "_mu_hat"
         disp_param_name = "genewise_dispersions"
 
         self.layers[mu_param_name] = np.full((self.n_obs, self.n_vars), np.nan)
         self.layers[mu_param_name][:, self.varm["non_zero"]] = mu_hat_
 
+        # Estimate per-gene dispersion via MLE (α_g)
         if not self.quiet:
             print("Fitting dispersions...", file=sys.stderr)
         start = time.time()
@@ -560,6 +668,7 @@ class deconveil_fit:
         if not self.quiet:
             print(f"... done in {end - start:.2f} seconds.\n", file=sys.stderr)
 
+        # Store results
         self.varm[disp_param_name] = np.full(self.n_vars, np.nan)
         self.varm[disp_param_name][self.varm["non_zero"]] = np.clip(
             dispersions_, self.min_disp, self.max_disp
@@ -609,7 +718,7 @@ class deconveil_fit:
         """Return the dispersion trend function at x."""
         if self.uns["disp_function_type"] == "parametric":
             return dispersion_trend(x, self.uns["trend_coeffs"])
-        elif self.disp_function_type == "mean":
+        elif self.uns["disp_function_type"] == "mean":
             return np.full_like(x, self.uns["mean_disp"])
             
 
@@ -731,8 +840,7 @@ class deconveil_fit:
         design_matrix = self.obsm["design_matrix"].values
         counts=self.data["counts"].to_numpy()
         cnv=self.data["cnv"].to_numpy()
-        cnv = cnv / 2
-        cnv = cnv + 0.1
+        cnv = (cnv / 2) + 0.1  
 
         if not self.quiet:
             print("Fitting LFCs...", file=sys.stderr)
@@ -740,7 +848,7 @@ class deconveil_fit:
         mle_lfcs_, mu_, hat_diagonals_, converged_ = self.inference.irls_glm(
             counts=counts[:, self.non_zero_idx],
             cnv=cnv[:, self.non_zero_idx],
-            size_factors=self.obsm["size_factors"],
+            size_factors=np.asarray(self.obsm["size_factors"]).reshape(-1),
             design_matrix=design_matrix,
             disp=self.varm["dispersions"][self.non_zero_idx],
             min_mu=self.min_mu,
@@ -863,9 +971,10 @@ class deconveil_fit:
         """
         # Check that size_factors are available. If not, compute them.
         if "normed_counts" not in self.layers:
-            self.fit_size_factors()
+            self.fit_size_factors(fit_type=self.size_factors_fit_type)
 
         normed_counts = self.layers["normed_counts"]
+        
         rde = self.inference.fit_rough_dispersions(
             normed_counts,
             self.obsm["design_matrix"].values,
@@ -1106,9 +1215,7 @@ class deconveil_fit:
             ),
             cnv=self.data["cnv"],
             metadata=self.metadata,
-            design_factors=self.design_factors,
-            continuous_factors=self.continuous_factors,
-            ref_level=self.ref_level,
+            design=self.design,
             min_mu=self.min_mu,
             min_disp=self.min_disp,
             max_disp=self.max_disp,

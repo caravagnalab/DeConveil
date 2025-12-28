@@ -261,9 +261,9 @@ class Inference(ABC):
         ridge_factor: np.ndarray,
         contrast: np.ndarray,
         lfc_null: np.ndarray,
-        alt_hypothesis: Optional[
-            Literal["greaterAbs", "lessAbs", "greater", "less"]
-        ] = None,
+        alt_hypothesis: (
+            Literal["greaterAbs", "lessAbs", "greater", "less"] | None
+        ) = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Run Wald test for differential expression.
 
@@ -320,7 +320,7 @@ class Inference(ABC):
         prior_scale: float,
         optimizer: str,
         shrink_index: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Fit a negative binomial MAP LFC using an apeGLM prior.
 
         Only the LFC is shrinked, and not the intercept.
