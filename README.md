@@ -1,6 +1,6 @@
 # DeConveil 
 
-<img src="docs/deconveil_logo.png" align="right" width="300">
+<img src="docs/logo.png" align="right" width="300">
 
 #
 [![pypi version](https://img.shields.io/pypi/v/DeConveil)](https://pypi.org/project/DeConveil)
