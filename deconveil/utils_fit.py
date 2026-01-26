@@ -648,7 +648,7 @@ def run_stageR(
             stageRObj,
             method = "{method}",
             alpha = {alpha},
-            allowNA = TRUE
+            #allowNA = TRUE
         )
 
         res_screen <- getAdjustedPValues(
