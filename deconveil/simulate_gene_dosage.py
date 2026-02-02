@@ -242,29 +242,22 @@ def sample_gene_parameters(
         c_g = cn_shift_log2[g]
         sign = rng.choice([-1, 1])
 
-        # -----------------------
         # NEUTRAL
-        # -----------------------
         if cls == "NEUTRAL":
             tau_g = rng.normal(0, 0.05)
             #naive_g = tau_g + rng.normal(0.0, 0.05)
 
-        # -------------------------
         # DIG — biology dominant
-        # -------------------------
         elif cls == "DIG":
             sign = rng.choice([-1, 1])
             tau_g = sign * rng.uniform(0.8, 2.5)
             #naive_g = tau_g + 0.2 * c_g  # small CN tilt
 
-        # ----------------------------
         # DSG — CN-driven apparent DE
-        # ----------------------------
         elif cls == "DSG":
             tau_g = rng.normal(0, 0.1)
             #naive_g = sign * abs(c_g) * rng.uniform(1.0, 2.0)
 
-        # --------------------------
         # DCG — dosage compensated
         # --------------------------
         elif cls == "DCG":
