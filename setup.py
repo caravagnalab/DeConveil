@@ -6,7 +6,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="DeConveil",
-    version="0.1.4",
+    version="0.2.0",
     description="An extension of PyDESeq2/DESeq2 designed to account for genome aneuploidy",
     url="https://github.com/caravagnalab/DeConveil",
     author="Katsiaryna Davydzenka",
@@ -25,8 +25,11 @@ setup(
         "matplotlib>=3.6.2",
         "seaborn>=0.12.2",
         "pydeseq2>=0.4.12",  
+        "rpy2>=3.5.0",
     ],
     extras_require={
+        # Optional Stan-based NB regression
+        "stan": ["cmdstanpy>=1.2.0"],
         "dev": [
             "pytest>=6.2.4",
             "pre-commit>=2.13.0",
