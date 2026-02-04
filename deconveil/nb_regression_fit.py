@@ -205,7 +205,6 @@ def postprocess_nb_results(
       - Rhat_b_deviation, ess_b_deviation, covar_levels
 
     Adds:
-      - adj_p       : BH-FDR over usable genes (status in {'ok','warn'})
       - aneup_frac  : n_aneup / N (CN informativeness proxy)
       - comp_score  : normalized deviation  = mean_b_deviation / mean_b_scaling
       - signed_comp : sign-normalized comp_score (flip for 'del', keep for 'amp'/'all')
@@ -216,10 +215,8 @@ def postprocess_nb_results(
       - Without a per-gene CN direction summary, signed_comp is only partially
         identifiable for cna='all'; here we flip sign for 'del' fits and leave
         'amp'/'all' unchanged.
-      - DCG/HYPER require both sufficient magnitude (|signed_comp| >= comp_thr) 
-      AND statistical significance (p_value <= alpha).
-      - DSG requires non-significant deviation (p_value > alpha) and small magnitude
-        |signed_comp| <= comp_thr, with sufficient CN signal.
+      - DCG/HYPER require sufficient magnitude |signed_comp| >= comp_thr
+      - DSG small magnitude |signed_comp| <= comp_thr, with sufficient CN signal.
     """
 
     df = res_df.copy()
@@ -242,12 +239,6 @@ def postprocess_nb_results(
     df.loc[status_lower.isin(["skip", "skipped"]), "label_nb"] = "SKIP"
     df.loc[status_lower.isin(["error", "failed", "fail"]), "label_nb"] = "ERROR"
 
-    # FDR across usable genes 
-    df["adj_p"] = np.nan
-    if usable.any():
-        df.loc[usable, "adj_p"] = bh_fdr(
-            df.loc[usable, "p_value"].to_numpy(dtype=float)
-        )
 
     # CN informativeness proxy (fraction aneuploid) 
     df["aneup_frac"] = np.nan
