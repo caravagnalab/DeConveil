@@ -7,19 +7,43 @@
 
 ## Introduction
 
-The goal of *DeConveil* is the extension of Differential Gene Expression testing by accounting for genome aneuploidy.
+The goal of *DeConveil* is the extension of Differential Gene Expression (DGE) testing by accounting for genome aneuploidy.
 This computational framework extends traditional DGE analysis by integrating DNA Copy Number Variation (CNV) data.
 This approach adjusts for dosage effects and categorizes genes as *dosage-sensitive (DSG)*, *dosage-insensitive (DIG)*, and *dosage-compensated (DCG)*, separating the expression changes caused by CNVs from other alterations in transcriptional regulation.
 To perform this gene separation we need to carry out DGE testing using both *PyDESeq2 (CN-naive)* and *DeConveil (CN-aware)* methods.
 
+In addition to the core *DeConveil* framework, the package also provides a complementary *Negative Binomial (NB) regression model*, which can be used independently as an alternative inference and analysis strategy.
+
 You can download the results of our analysis from [deconveilCaseStudies](https://github.com/kdavydzenka/deconveilCaseStudies)
 
+## Inference methods
+
+*DeConveil* provides two complementary approaches for modeling gene expression in the presence of genome aneuploidy.
+
+### 1) Core DeConveil framework (default)
+
+The main *DeConveil* framework extends *DESeq2/PyDESeq2* by incorporating copy-number information.
+This approach is designed for standard DGE analysis while accounting for dosage-dependent effects and is the default and recommended workflow.
+
+### 2) Complementary Negative Binomial regression (Stan-based)
+
+*DeConveil* also implements a complementary *NB regression model*, implemented in Stan and accessed via `cmdstanpy`.
+This model is applied only to tumor samples and is designed to test dosage sensitivity and dosage compensation by directly modeling the relationship between gene expression and CNV.
+
+The Stan-based NB regression can be used independently of the core *DeConveil* pipeline and is intended for users who want:
+- a focused analysis of dosage-dependent expression in tumor samples;
+- Bayesian inference
+- explicit uncertainty quantification
+
+The Stan-based NB regression is optional and does not affect the core *DeConveil* workflow.
 
 ## Installation
 
 **Pre-required installations before running DeConveil**
 
-Python libraries are required to be installed: *pydeseq2*
+### Python dependencies
+
+Python libraries required for the core *DeConveil* framework include `pydeseq2`
 
 `pip install pydeseq2`
 
@@ -30,6 +54,27 @@ Python libraries are required to be installed: *pydeseq2*
 `DeConveil` can also be installed from Bioconda with `conda`:
 
 `conda install -c bioconda deconveil`
+
+### R dependencies (required)
+
+*DeConveil* relies on the R package `stageR` (via `rpy2`) for stage-wise multiple testing and FDR control.
+A working `R` installation and the `stageR` package are required.
+The package can be installed from Bioconductor:
+
+`BiocManager::install("stageR")`
+
+### Optional Stan support
+
+The complementary NB regression requires the Python package `cmdstanpy` and a working installation of `CmdStan`.
+To enable Stan support, install DeConveil with the stan extra:
+
+`pip install DeConveil[stan]`
+
+Then install CmdStan:
+
+`python -m cmdstanpy.install_cmdstan`
+
+If Stan support is not installed, the core DeConveil framework remains fully functional.
 
 
 ## Data
