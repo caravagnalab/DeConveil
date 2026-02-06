@@ -49,7 +49,7 @@ Python libraries required for the core *DeConveil* framework include `pydeseq2`
 
 `DeConveil` can be installed from PyPI using `pip`:
 
-`pip install DeConveil`
+`pip install deconveil`
 
 `DeConveil` can also be installed from Bioconda with `conda`:
 
@@ -68,7 +68,7 @@ The package can be installed from Bioconductor:
 The complementary NB regression requires the Python package `cmdstanpy` and a working installation of `CmdStan`.
 To enable Stan support, install DeConveil with the stan extra:
 
-`pip install DeConveil[stan]`
+`pip install "deconveil[stan]"`
 
 Then install CmdStan:
 
