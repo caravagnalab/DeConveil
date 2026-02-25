@@ -1,5 +1,6 @@
 // -----------------------------------------------------------------------------
 // Gene-by-gene subtype-aware CN-expression model (log link)
+// Improves regularization across subtypes - estimated SD from data with shrinkage toward zero SD
 //
 // Tumor mean:
 //   tumor_mu = sf * purity *
@@ -35,32 +36,42 @@ data {
 }
 
 parameters {
+  // global means
   real b0_mean;
-  vector[S] b0_offset;
-
   real b_scaling_mean;
-  vector[S] b_scaling_offset;
-
   real b_dev_mean;
-  vector[S] b_dev_offset;
+
+  // non-centered subtype offsets
+  vector[S] z_b0;
+  vector[S] z_b_scaling;
+  vector[S] z_b_dev;
+
+  // hierarchical scales (between-subtype SDs)
+  real<lower=0> tau_b0;
+  real<lower=0> tau_b_scaling;
+  real<lower=0> tau_b_dev;
 
   real b_noncancer_log;
 
-  real<lower=1e-6> phi;
+  real log_phi;   // as in the VI-friendly version
 }
 
 transformed parameters {
-
   vector[S] b0;
   vector[S] b_scaling;
   vector[S] b_deviation;
 
-  vector[N] mu;
+  vector[S] b0_off;
+  vector[S] scale_off;
+  vector[S] dev_off;
 
-  // sum-to-zero centering
-  vector[S] b0_off      = b0_offset        - mean(b0_offset);
-  vector[S] scale_off   = b_scaling_offset - mean(b_scaling_offset);
-  vector[S] dev_off     = b_dev_offset     - mean(b_dev_offset);
+  vector[N] log_mu;
+  real<lower=0> phi = exp(log_phi);
+
+  // sum-to-zero centered offsets via non-centered parameterization
+  b0_off      = tau_b0       * (z_b0       - mean(z_b0));
+  scale_off   = tau_b_scaling* (z_b_scaling- mean(z_b_scaling));
+  dev_off     = tau_b_dev    * (z_b_dev    - mean(z_b_dev));
 
   b0          = b0_mean        + b0_off;
   b_scaling   = b_scaling_mean + scale_off;
@@ -75,34 +86,37 @@ transformed parameters {
       + dose_log[n] * b_scaling[s]
       + dev[n]      * b_deviation[s];
 
-    linpred = fmin(linpred, 20);   // prevent overflow
+    real log_tumor_mu =
+      log(sf[n]) + log(purity[n]) + linpred;
 
-    real tumor_mu =
-      sf[n] * purity[n] * exp(linpred);
+    real log_stroma_mu =
+      log(sf[n]) + log(stroma_frac) + b_noncancer_log;
 
-    real stroma_mu =
-      sf[n] * stroma_frac * exp(b_noncancer_log);
-
-    mu[n] = tumor_mu + stroma_mu;
+    log_mu[n] = log_sum_exp(log_tumor_mu, log_stroma_mu);
   }
 }
 
 model {
+  // global means (same as before or similar)
+  b0_mean        ~ normal(0, 0.5);
+  b_scaling_mean ~ normal(0, 0.5);
+  b_dev_mean     ~ normal(0, 0.1);
 
-  b0_mean          ~ normal(0, 0.5);
-  b0_offset        ~ normal(0, 0.3);
+  // hierarchical scales (half-normal-ish)
+  tau_b0        ~ normal(0, 0.3);   // half-normal via <lower=0>
+  tau_b_scaling ~ normal(0, 0.3);
+  tau_b_dev     ~ normal(0, 0.1);
 
-  b_scaling_mean   ~ normal(0, 0.5);
-  b_scaling_offset ~ normal(0, 0.3);
+  // non-centered latent z's
+  z_b0        ~ normal(0, 1);
+  z_b_scaling ~ normal(0, 1);
+  z_b_dev     ~ normal(0, 1);
 
-  b_dev_mean       ~ normal(0, 0.1);
-  b_dev_offset     ~ normal(0, 0.1);
+  b_noncancer_log ~ normal(0, 0.5);
 
-  b_noncancer_log  ~ normal(0, 0.5);
+  log_phi ~ normal(0, 1);
 
-  phi ~ exponential(1);
-
-  y ~ neg_binomial_2(mu, phi);
+  y ~ neg_binomial_2_log(log_mu, phi);
 }
 
 generated quantities {
@@ -198,5 +212,5 @@ generated quantities {
   }
 
   for (n in 1:N)
-    log_lik[n] = neg_binomial_2_lpmf(y[n] | mu[n], phi);
+    log_lik[n] = neg_binomial_2_log_lpmf(y[n] | log_mu[n], phi);
 }
