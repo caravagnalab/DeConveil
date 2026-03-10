@@ -106,18 +106,22 @@ transformed parameters {
 
 model {
 
-  b0_mean          ~ normal(0, 0.5);
-  b0_offset        ~ normal(0, 0.3);
+  // Empirical biology-informed priors (from LUAD/LUSC) 
 
-  b_scaling_mean   ~ normal(0, 0.5);
+  b0_mean          ~ normal(5.0, 2.0);
+  b0_offset        ~ normal(0, 0.5);
+
+  b_scaling_mean   ~ normal(0.4, 0.7);
   b_scaling_offset ~ normal(0, 0.3);
 
-  b_dev_mean       ~ normal(0, 0.1);
-  b_dev_offset     ~ normal(0, 0.1);
+  b_dev_mean       ~ normal(0.1, 0.45);
+  b_dev_offset     ~ normal(0, 0.2);
 
-  b_noncancer_log  ~ normal(0, 0.5);
+  b_noncancer_log  ~ normal(log(5), 1.0);
 
-  phi ~ exponential(1);
+  //phi ~ exponential(0.7);
+
+  phi ~ lognormal(log(20), 0.5);
   
   // Likelihood using log-scale parameterization
   
@@ -173,6 +177,11 @@ generated quantities {
   delta_scaling = b_scaling[2] - b_scaling[1];
   delta_dev     = b_deviation[2] - b_deviation[1];
 
+  // posterior predictive replicated counts
+  array[N] int y_rep;
+
+  vector[N] mu_rep;
+
   for (s in 1:S) {
     // -------------------------
     // CN 2 -> 1 (single-copy loss)
@@ -217,7 +226,14 @@ generated quantities {
       lp_dev_2to4[s] / fmax(abs(lp_scaling_2to4[s]), 1e-12);
   }
 
-  for (n in 1:N)
-    // reuse log_mu + phi for pointwise log-lik
+  for (n in 1:N) {
+    // pointwise log-likelihood
     log_lik[n] = neg_binomial_2_log_lpmf(y[n] | log_mu[n], phi);
+
+    mu_rep[n] = exp(log_mu[n]);
+
+    // posterior predictive sample
+    real log_mu_safe = fmin(log_mu[n], 20);   // prevent RNG overflow
+    y_rep[n] = neg_binomial_2_log_rng(log_mu_safe, phi);
+  }
 }
